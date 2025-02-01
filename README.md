@@ -13,12 +13,12 @@ implement your own hooks (see [HACKING](HACKING)).
 
 > [!NOTE]  
 > This fork implements zip and 7zip handling. There is also a new cleanup hook
-  for setting a new owner or new permissions to extracted files 
+  for setting a new owner or new permissions for extracted files 
   (`set_user_rights`).
 
 > [!CAUTION]  
 > I consider this more of a quick hack because I haven't written any tests yet. 
-  Further work amd refactoring is needed.
+  Further work and refactoring is needed.
 
 ## SUPPORTED FILE TYPES / EXTENSIONS
 
@@ -30,7 +30,7 @@ implement your own hooks (see [HACKING](HACKING)).
 
 ## INSTALL
 
-1. Mmake sure you set the "executable" permission. This
+1. Make sure you set the "executable" permission. This
    can be done using the following command:
 
 ```
