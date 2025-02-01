@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 #unrarall
+# Copyright (C) 2024 Patrick Brueggemann (admin@shrimpanse.de)
 # Copyright (C) 2011, 2012, 2013 Brendan Le Foll <brendan@fridu.net>
 # Copyright (C) 2011, 2012, 2013 Dan Liew <dan@su-root.co.uk>
 #
@@ -29,15 +30,17 @@ declare -ix VERBOSE=0
 declare -ix QUIET=0
 declare -ix CKSFV=1
 declare -ix ALLOW_FAILURES=0
-declare -x UNRAR_METHOD="e"
+declare -x UNRAR_METHOD="x"
 declare -x CKSFV_FLAGS="-q -g"
 declare -x UNRARALL_BIN="" #Leave empty to let unrarall to loop through UNRAR_BINARIES, setting this will disable searching through UNRAR_BINARIES
 declare -x UNRAR_BINARIES=(unrar rar 7z) #Array of binaries to try and use, the order here is the order of precedence
 declare -x UNRARALL_PID="$$"
 declare -x UNRARALL_EXECUTABLE_NAME=$(basename $0;)
-declare -x UNRARALL_PASSWORD_FILE="${HOME}/.unrar_passwords" #If this exists and unrar asks for a password
+declare -x UNRARALL_PASSWORD_FILE="/mnt/user/appdata/unrarall/archive_passwords.txt" #If this exists and unrar asks for a password
 declare -ax UNRARALL_DETECTED_CLEAN_UP_HOOKS
 declare -ax UNRARALL_CLEAN_UP_HOOKS_TO_RUN=(none)
+declare -x UNRARALL_CLEAN_UP_HOOK_PERM_OWNER="nobody:users"
+declare -x UNRARALL_CLEAN_UP_HOOK_PERM_RIGHTS="u-x,go-rwx,go+u,ugo+X"
 declare -x UNRARALL_OUTPUT_DIR=""
 declare -ix DEPTH=4
 declare -ix SKIP_IF_EXISTS=0
@@ -312,14 +315,14 @@ function unrarall_remove_file_or_folder()
 }
 
 #Start of clean-up hooks
-# unrarall_clean_* <MODE> <SFILENAME> <RARFILE_DIR>
+# unrarall_clean_* <MODE> <SFILENAME> <ARCHIVE_FILE_DIR>
 # <MODE> is either help or clean
 # <SFILENAME> is the name of the rar file but with rar suffix removed
-# <RARFILE_DIR> is the directory containing the rar files
+# <ARCHIVE_FILE_DIR> is the directory containing the rar files
 # Hooks should use ${RM} instead of the 'rm' command
 # Hooks cannot be named "all" or "none" as these are reserved.
 # Hooks can assume that the current working directory is the directory where files
-# extracted. This is not necessarily the same as <RARFILE_DIR> is --output was specified
+# extracted. This is not necessarily the same as <ARCHIVE_FILE_DIR> is --output was specified
 
 function unrarall_clean_nfo()
 {
@@ -348,7 +351,7 @@ function unrarall_clean_rar()
       _RARFILE_DIR="${3%/}"
       [ $VERBOSE -eq 1 ] && message info "Deleting ${2} rar files (in \"${_RARFILE_DIR}\")..."
       if [ ! -d "${_RARFILE_DIR}" ]; then
-        message error "RARFILE_DIR (${_RARFILE_DIR}) is not a directory"
+        message error "ARCHIVE_FILE_DIR (${_RARFILE_DIR}) is not a directory"
         return
       fi
 
@@ -455,6 +458,23 @@ function unrarall_clean_sample_videos()
   esac
 }
 
+function unrarall_clean_set_user_rights()
+{
+  case "$1" in
+    help)
+      echo "Sets correct owner and permissions of extracted files"
+    ;;
+    clean)
+      [ "$VERBOSE" -eq 1 ] && message info "Setting correct user and permissions of extracted files"
+      find_wrapper . -exec chown -R $UNRARALL_CLEAN_UP_HOOK_PERM_OWNER '{}' \;
+      find_wrapper . -exec chmod -R $UNRARALL_CLEAN_UP_HOOK_PERM_RIGHTS '{}' \;
+    ;;
+    *)
+      message error "Could not execute set_user_rights hook"
+    ;;
+  esac
+}
+
 function unrarall_clean_empty_folders()
 {
   case "$1" in
@@ -464,7 +484,7 @@ function unrarall_clean_empty_folders()
     clean)
       [ "$VERBOSE" -eq 1 ] && message info "Removing empty folders"
       if [ ! -d "${3}" ]; then
-        message error "RARFILE_DIR (${3}) is not a directory"
+        message error "ARCHIVE_FILE_DIR (${3}) is not a directory"
         return
       fi
       find_wrapper "${3}" -depth -mindepth 1 -type d -empty -exec rmdir $( [ $VERBOSE -eq 1 ] && echo '-v') '{}' \;
@@ -489,6 +509,8 @@ function safe_move()
     done
   fi
 }
+
+message info "Starting ${UNRARALL_EXECUTABLE_NAME} v${UNRARALL_VERSION} DEV"
 
 # Detect the version of sed available and create a wrapper function
 # that will behave like sed using "extended regular expressions"
@@ -780,8 +802,10 @@ FAIL_COUNT=0
 #modify IFS for new lines so filenames with spaces do not get split
 IFS_TEMP=$IFS
 IFS=$(echo -en "\n\b")
-# Match application/x-rar and the newer (file > 5.45) application/vnd.rar type
+
 MATCHRARMIME='^application\/(vnd\.rar|x-rar)$'
+MATCH7ZMIME='^application\/x-7z-compressed$'
+MATCHZIPMIME='^(application|multipart)\/(x-)?zip($|(-compressed)?$)'
 
 if [ "$CKSFV" -eq 1 ]; then
   if ! type -P cksfv 2>&1 > /dev/null ; then
@@ -791,11 +815,27 @@ if [ "$CKSFV" -eq 1 ]; then
 fi
 
 # assuming only the .rar files are of interest
-for file in $(find_wrapper "$DIR" -depth -iregex '.*\.(rar|001)$'); do
+for file in $(find_wrapper "$DIR" -depth -iregex '.*\.(rar|001|zip|7z|7z\.001)$'); do
 
   filename=`basename "${file}"`
   # Strip extension off filename
   sfilename="${filename%.*}"
+
+  # check mime type first and set UNRARALL_BIN
+  mime_type=$(file --mime-type -b "${file}")
+  echo $mime_type
+  if [[ "$mime_type" =~ $MATCHZIPMIME ]]; then
+    UNRARALL_BIN="7z"
+  elif [[ "$mime_type" =~ $MATCH7ZMIME ]]; then
+    UNRARALL_BIN="7z"
+  elif [[ "$mime_type" =~ $MATCHRARMIME ]]; then
+    UNRARALL_BIN=""  # left empty to use UNRAR_BINARIES
+  else
+    message error "Skipping file \"${file}\" because it does not appear to be a valid rar file."
+    # Treat this as a failure so we exit with a non zero exit code
+    let FAIL_COUNT=FAIL_COUNT+1
+    continue
+  fi
 
   # if rar is of style partxx.rar then only extract $filename.part01.rar
   if [[ "$file" =~ .part[0-9]+.rar$ ]]; then
@@ -805,21 +845,10 @@ for file in $(find_wrapper "$DIR" -depth -iregex '.*\.(rar|001)$'); do
     else
       continue
     fi
-  # allow rar archives with .001 -> .999 naming
-  elif [[ "$file" =~ .[0-9][0-9][0-9]$ ]]; then
-    if [[ "$file" =~ .001$ ]]; then
-      message info "Your packager is wrong, 001 is not an acceptable filename for a rar file. We'll attempt to clean up his mess anyways..."
-    else
-      continue
-    fi
-  fi
-
-  # check file really is a rar file
-  if [[ ! "`file --mime-type -b "${file}"`" =~ $MATCHRARMIME ]]; then
-    message error "Skipping file \"${file}\" because it does not appear to be a valid rar file."
-    # Treat this as a failure so we exit with a non zero exit code
-    let FAIL_COUNT=FAIL_COUNT+1
-    continue
+  # if 7z is of style 7z.001 then only extract $filename.7z.001
+  elif [[ "$file" =~ .7z.*$ ]]; then
+    sfilename=`echo "$sfilename" | sed_wrapper 's/\.7z.001$//'`
+    [ $VERBOSE -eq 1 ] && message info "Using 7zip split archive format"
   fi
 
   let COUNT=COUNT+1
@@ -827,7 +856,7 @@ for file in $(find_wrapper "$DIR" -depth -iregex '.*\.(rar|001)$'); do
   # move to directory
   dirname=`dirname "$file"`
   cd "$dirname"
-  RARFILE_DIR="$(pwd)"
+  ARCHIVE_FILE_DIR="$(pwd)"
 
   SUCCESS=0
   if [ "$CKSFV" -eq 1 ]; then
@@ -840,7 +869,7 @@ for file in $(find_wrapper "$DIR" -depth -iregex '.*\.(rar|001)$'); do
     fi
   fi
 
-  # Compute fullpath to rar file
+  # Compute fullpath to archive file
   filenameAbsolute="$(pwd)/${filename}"
 
   # Check if file is extracted
@@ -866,7 +895,7 @@ for file in $(find_wrapper "$DIR" -depth -iregex '.*\.(rar|001)$'); do
   fi
   tmp_dir=`pwd`
 
-  # unrar file if SFV checked out or --force was given
+  # extract file if SFV checked out or --force was given
   if [ "$SUCCESS" -eq 0 ] || [ "$FORCE" -eq 1 ]; then
     message nnl "Extracting (${UNRAR_METHOD}) \"$file\"..."
     file_encrypted=$(isRarEncrypted ${UNRARALL_BIN} ${filenameAbsolute})
@@ -900,10 +929,10 @@ for file in $(find_wrapper "$DIR" -depth -iregex '.*\.(rar|001)$'); do
   fi
 
   # Check if any recursive extraction is needed
-  if [ "$SUCCESS" -eq 0 ] && [ "${DEPTH}" -gt 0 ] && [[ -n `find_wrapper . -depth -iregex '.*\.(rar|001)$'` ]]; then
-    [ $VERBOSE -eq 1 ] && message ok "Detected rar archives inside of \"$file\", recursively extracting"
+  if [ "$SUCCESS" -eq 0 ] && [ "${DEPTH}" -gt 0 ] && [[ -n `find_wrapper . -depth -iregex '.*\.(rar|001|zip|7z|7z\.001)$'` ]]; then
+    [ $VERBOSE -eq 1 ] && message ok "Detected archives inside of \"$file\", recursively extracting"
     let NEW_DEPTH=DEPTH-1
-    eval $UNRARALL_CMD --depth $NEW_DEPTH ${tmp_dir}
+    eval ${UNRARALL_EXECUTABLE_NAME} --depth $NEW_DEPTH "${tmp_dir}"
     if [ $? -ne 0 ]; then
       message error "Failed to recursively extract \"${filenameAbsolute}\""
       SUCCESS=1
@@ -934,9 +963,9 @@ for file in $(find_wrapper "$DIR" -depth -iregex '.*\.(rar|001)$'); do
       exit 1
     fi
   else
-    cd "${RARFILE_DIR}"
+    cd "${ARCHIVE_FILE_DIR}"
     if [ $? -ne 0 ]; then
-      message error "Failed to switch to rar directory \"${RARFILE_DIR}\""
+      message error "Failed to switch to rar directory \"${ARCHIVE_FILE_DIR}\""
       exit 1
     fi
   fi
@@ -950,7 +979,7 @@ for file in $(find_wrapper "$DIR" -depth -iregex '.*\.(rar|001)$'); do
     fi
     safe_move "${tmp_dir}/${extracted_file}" "${extracted_file}"
     if [ $? -ne 0 ]; then
-      message error "Failed to move \"${extracted_file}\" to \"${RARFILE_DIR}\""
+      message error "Failed to move \"${extracted_file}\" to \"${ARCHIVE_FILE_DIR}\""
       exit 1
     fi
   done
@@ -980,13 +1009,13 @@ for file in $(find_wrapper "$DIR" -depth -iregex '.*\.(rar|001)$'); do
         #Run every clean up hook
         for hook in ${UNRARALL_DETECTED_CLEAN_UP_HOOKS[*]} ; do
           message nnl "$hook "
-          ( unrarall_clean_$hook clean $sfilename "${RARFILE_DIR}" )
+          ( unrarall_clean_$hook clean $sfilename "${ARCHIVE_FILE_DIR}" )
         done
       else
         #Run selected clean up hooks
         for hook in ${UNRARALL_CLEAN_UP_HOOKS_TO_RUN[*]} ; do
           message nnl "$hook "
-          ( unrarall_clean_$hook clean $sfilename "${RARFILE_DIR}")
+          ( unrarall_clean_$hook clean $sfilename "${ARCHIVE_FILE_DIR}")
         done
       fi
       message ok "Finished running hooks"
